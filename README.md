@@ -17,8 +17,9 @@ instance inside the structure
   Replay->new (
         EventSystem => {
             Mode     => 'AWSMQ',
-            awsIdentity => 'MY AWS IDENTITY', 
-            mqService   => 'URL OF YOUR MQ SERVICE',
+            mqEndpoint   => 'STOMP ENDPOINT URI OF YOUR MQ SERVICE',
+            mqUsername   => 'Username for your MQ SERVICE',
+            mqPassword   => 'Password for your MQ SERVICE',
         },
   );
 ```

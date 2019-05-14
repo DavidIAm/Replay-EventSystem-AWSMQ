@@ -249,11 +249,7 @@ Replay::EventSystem::AWSQueue->new(
     config  => {
         stage       => 'test',
         EventSystem => {
-            awsIdentity => {
-                access => 'AKIAILL6EOKUCA3BDO5A',
-                secret => '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',
-            },
-            mqEndpoint => 'https://sns.us-east-1.amazonaws.com',
+            mqEndpoint => 'STOMP endpoint from MQ',
             mqUsername => 'doggiedoggie',
             mqPassword => 'doggiedoggie',
         },
@@ -264,13 +260,10 @@ Replay::EventSystem::AWSQueue->new(
 
 Utilizers should expect the object instance to be a singleton per each $purpose.
 
-The account provided is expected to have the permissions to create topics and queues.
-
-It will create SNS topic for the indicated purpose named <stage>-replay-<purpose>
-
-It will create distinct SQS queues for the instance, named <stage>-replay-<purpose>-<uuid>
-
-It will also subscribe the queue to the topic.
+It expects you to have set up an MQ server and configured it with a username and
+password.  this uses STOMP protocol to connect, so you'll also have to add your
+system that will be connecting to it to be allowed on the proper 61614 port 
+for STOMP.
 
 =head1 SUBROUTINES/METHODS
 
