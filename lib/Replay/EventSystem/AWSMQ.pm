@@ -8,11 +8,11 @@ with 'Replay::Role::EventSystem';
 
 use Replay::Message;
 
-#use Replay::Message::Clock;
 use Carp qw/carp croak confess/;
 
 use Perl::Version;
 use IO::Socket::SSL;
+use Net::STOMP::Client;
 use Data::Dumper;
 use Try::Tiny;
 use Data::UUID;
@@ -22,37 +22,55 @@ use Carp qw/confess/;
 
 has purpose => ( is => 'ro', isa => 'Str', required => 1, );
 has subscribers => ( is => 'ro', isa => 'ArrayRef', default => sub { [] }, );
-has sns =>
-    ( is => 'ro', isa => 'Amazon::SNS', builder => '_build_sns', lazy => 1, );
-has sqs => (
-    is      => 'ro',
-    isa     => 'Amazon::SQS::Simple',
-    builder => '_build_sqs',
-    lazy    => 1,
-);
 
 has config => ( is => 'ro', isa => 'HashRef[Item]', required => 1 );
 
-has queue => (
-    is        => 'ro',
-    isa       => 'Amazon::SQS::Simple::Queue',
-    builder   => '_build_queue',
-    predicate => 'has_queue',
-    lazy      => 1,
-);
-
-has topic => (
+has client => (
     is      => 'ro',
-    isa     => 'Amazon::SNS::Topic',
-    builder => '_build_topic',
+    isa     => 'Net::STOMP::Client',
+    builder => '_build_client',
     lazy    => 1,
 );
 
-has topicarn => ( is => 'ro', isa => 'Str', predicate => 'has_topicarn' );
+has connection => (
+    is        => 'ro',
+    isa       => 'Net::STOMP::Client',
+    builder   => '_build_connection',
+    predicate => 'has_connection',
+    lazy      => 1,
+);
+
 has topicName =>
     ( is => 'ro', isa => 'Str', builder => '_build_topic_name', lazy => 1, );
-has queuearn =>
-    ( is => 'ro', isa => 'Str', builder => '_build_queuearn', lazy => 1 );
+
+has stompEndpoint => (
+    is      => 'ro',
+    isa     => 'Str',
+    builder => '_build_stomp_endpoint',
+    lazy    => 1
+);
+
+has stompUsername => (
+    is      => 'ro',
+    isa     => 'Str',
+    builder => '_build_stomp_username',
+    lazy    => 1
+);
+
+has stompPassword => (
+    is      => 'ro',
+    isa     => 'Str',
+    builder => '_build_stomp_password',
+    lazy    => 1
+);
+
+has queue => (
+    is      => 'ro',
+    isa     => 'Net::STOMP::Client',
+    builder => '_build_queue',
+    lazy    => 1
+);
+
 has queueName =>
     ( is => 'ro', isa => 'Str', builder => '_build_queue_name', lazy => 1 );
 
@@ -69,7 +87,10 @@ sub emit {
     }
     my $uuid = $message->UUID;
 
-    $self->topic->Publish( to_json $message->marshall ) or return;
+    $self->connection->send(
+        destination => $self->topicName,
+        body        => to_json $message->marshall
+    ) or return;
 
     return $uuid;
 }
@@ -105,103 +126,38 @@ sub subscribe {
 }
 
 sub _acknowledge {
-    my ( $self, @messages ) = @_;
-    return $self->queue->DeleteMessageBatch( [@messages] );
+    my ( $self, @frames ) = @_;
+    $self->client->ack( frame => $_) foreach (@frames);
 }
 
 sub _receive {
     my ($self) = @_;
-    my @messages = $self->queue->ReceiveMessageBatch;
-    return if not scalar @messages;
-    $self->_acknowledge(@messages);
     my @payloads;
-    foreach my $message (@messages) {
-
-        try {
-            my $message_body = from_json $message->MessageBody;
-            my $innermessage = from_json $message_body->{Message};
-            push @payloads, $innermessage;
-        }
-        catch {
-            carp
-                q(There was an exception while processing message through _receive )
-                . 'message='
-                . Dumper($message)
-                . $_;
-            exit;
-        }
-    }
-    return @payloads;
-}
-
-sub _build_sqs {    ## no critic (ProhibitUnusedPrivateSubroutines)
-    my ($self) = @_;
-    my $config = $self->config;
-    croak q(No sqs service?) if not $config->{EventSystem}{sqsService};
-    use Data::Dumper;
-    croak q(No access key?) . Dumper $config
-        if not $config->{EventSystem}{awsIdentity}{access};
-    croak q(No secret key?)
-        if not $config->{EventSystem}{awsIdentity}{secret};
-    my $sqs = Amazon::SQS::Simple->new(
-        $config->{EventSystem}{awsIdentity}{access},
-        $config->{EventSystem}{awsIdentity}{secret},
-        Endpoint => $config->{EventSystem}{sqsService}
-    );
-    return $sqs;
-}
-
-sub _build_sns {    ## no critic (ProhibitUnusedPrivateSubroutines)
-    my ($self) = @_;
-    my $config = $self->config;
-    croak q(No access key?) . Dumper $config
-        if not $config->{EventSystem}{awsIdentity}{access};
-    croak q(No secret key?)
-        if not $config->{EventSystem}{awsIdentity}{secret};
-    my $sns = Amazon::SNS->new(
-        {   key    => $config->{EventSystem}{awsIdentity}{access},
-            secret => $config->{EventSystem}{awsIdentity}{secret}
-        }
-    );
-    $sns->service( $config->{EventSystem}{snsService} );
-    return $sns;
-}
-
-sub _build_queue {    ## no critic (ProhibitUnusedPrivateSubroutines)
-    my ($self) = @_;
-    carp q(BUILDING QUEUE ) . $self->queueName if $ENV{DEBUG_REPLAY_TEST};
-    my $queue = $self->sqs->CreateQueue( $self->queueName );
-    carp q(SETTING QUEUE POLICY ) . $self->queueName
-        if $ENV{DEBUG_REPLAY_TEST};
-    $queue->SetAttribute(
-        'Policy',
-        to_json(
-            {   q(Version)   => q(2012-10-17),
-                q(Statement) => [
-                    {   q(Sid)       => q(PolicyForQueue) . $self->queueName,
-                        q(Effect)    => q(Allow),
-                        q(Principal) => { q(AWS) => q(*) },
-                        q(Action)    => q(sqs:SendMessage),
-                        q(Resource)  => $self->queuearn,
-                        q(Condition) => {
-                            q(ArnEquals) =>
-                                { q(aws:SourceArn) => $self->topic->arn }
-                        }
-                    }
-                ]
+    $self->queue->wait_for_frames(
+        callback => sub {
+            my ( $self, $frame ) = @_;
+            if ( $frame->command() eq "MESSAGE" ) {
+                try {
+                    my $message_body = from_json $frame->body();
+                    my $innermessage = $message_body->{Message};
+                    push @payloads,
+                        { message => $message_body, frame => $frame };
+                }
+                catch {
+                    carp
+                        q(There was an exception while processing message through _receive )
+                        . 'message='
+                        . Dumper( $frame->body() )
+                        . $_;
+                    exit;
+                }
             }
-        )
+        },
+        timeout => 0
     );
-    carp q(SUBSCRIBING TO QUEUE ) . $self->queueName
-        if $ENV{DEBUG_REPLAY_TEST};
-    $self->{subscriptionARN} = $self->sns->dispatch(
-        {   Action   => 'Subscribe',
-            Endpoint => $self->queuearn,
-            Protocol => 'sqs',
-            TopicArn => $self->topic->arn,
-        }
-    )->{'SubscribeResult'}{'SubscriptionArn'};
-    return $queue;
+    return if not scalar @payloads;
+    $self->_acknowledge(map { $_->{frame} } @payloads);
+    return map { $_->{message} } @payloads;
 }
 
 sub done {
@@ -211,15 +167,8 @@ sub done {
 
 sub DEMOLISH {
     my ($self) = @_;
-    if ( $self->has_queue && $self->queue && $self->mode eq 'fanout' ) {
-        if ( $self->{subscriptionARN} ) {
-            $self->sns->dispatch(
-                {   Action          => 'Unsubscribe',
-                    SubscriptionArn => $self->{subscriptionARN}
-                }
-            );
-        }
-        $self->queue->Delete;
+    if ( $self->has_connection && $self->mode eq 'fanout' ) {
+        $self->connection->disconnect();
     }
 
     return;
@@ -231,24 +180,6 @@ sub _build_topic_name {    ## no critic (ProhibitUnusedPrivateSubroutines)
     return join q(_), $self->config->{stage}, 'replay', $self->purpose;
 }
 
-sub _build_topic {         ## no critic (ProhibitUnusedPrivateSubroutines)
-    my ($self) = @_;
-    my $topic;
-    carp q(BUILDING TOPIC ) . $self->topicName if $ENV{DEBUG_REPLAY_TEST};
-    if ( $self->has_topicarn ) {
-        $topic = $self->sns->GetTopic( $self->topicarn );
-    }
-    else {
-        $topic = $self->sns->CreateTopic( $self->topicName );
-    }
-    croak 'SNS error cannot create topic='
-        . $topic
-        . ' Error:'
-        . $self->sns->error
-        if ( $self->sns->error );
-    return $topic;
-}
-
 sub _build_queue_name {    ## no critic (ProhibitUnusedPrivateSubroutines)
     my $self = shift;
     my $ug   = Data::UUID->new;
@@ -256,12 +187,41 @@ sub _build_queue_name {    ## no critic (ProhibitUnusedPrivateSubroutines)
         ( $self->mode eq 'fanout' ? $ug->to_string( $ug->create ) : () );
 }
 
-# this derives the arn from the topic name.
-sub _build_queuearn {      ## no critic (ProhibitUnusedPrivateSubroutines)
+sub _build_client {
     my $self = shift;
-    my ( $type, $domain, $service, $region, $id, $name ) = split /:/sxm,
-        $self->topic->arn;
-    return join q(:), $type, $domain, 'sqs', $region, $id, $self->queueName;
+    return Net::STOMP::Client->new( uri => $self->stompEndpoint );
+}
+
+sub _build_connection {
+    my $self = shift;
+    return $self->client->connect(
+        login    => $self->stompUsername,
+        passcode => $self->stompPassword,
+    );
+}
+
+sub _build_queue {
+    my $self = shift;
+    return $self->connection->subscribe(
+        destination => $self->topicName,
+        id          => Data::UUID->new,
+        ack         => "client",           # client side acknowledgment
+    );
+}
+
+sub _build_stomp_endpoint {    ## no critic (ProhibitUnusedPrivateSubroutines)
+    my $self = shift;
+    return $self->config->{EventSystem}->{mqEndpoint};
+}
+
+sub _build_stomp_username {    ## no critic (ProhibitUnusedPrivateSubroutines)
+    my $self = shift;
+    return $self->config->{EventSystem}->{mqUsername};
+}
+
+sub _build_stomp_password {    ## no critic (ProhibitUnusedPrivateSubroutines)
+    my $self = shift;
+    return $self->config->{EventSystem}->{mqPassword};
 }
 
 1;
@@ -281,7 +241,7 @@ Version 0.01
 =head1 SYNOPSIS
 
 This is an Event System implementation module targeting the AWS services
-of SNS and SQS.  If you were to instantiate it independently, it might 
+of MQ.  If you were to instantiate it independently, it might 
 look like this.
 
 Replay::EventSystem::AWSQueue->new(
@@ -293,8 +253,9 @@ Replay::EventSystem::AWSQueue->new(
                 access => 'AKIAILL6EOKUCA3BDO5A',
                 secret => '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',
             },
-            snsService => 'https://sns.us-east-1.amazonaws.com',
-            sqsService => 'https://sqs.us-east-1.amazonaws.com',
+            mqEndpoint => 'https://sns.us-east-1.amazonaws.com',
+            mqUsername => 'doggiedoggie',
+            mqPassword => 'doggiedoggie',
         },
     }
 );

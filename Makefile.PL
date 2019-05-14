@@ -64,12 +64,16 @@ requires     'Readonly';
 requires     'Scalar::Util';
 requires     'Try::Tiny';
 
+test_requires 'App::Prove::Watch';
+test_requires 'Time::HiRes';
 test_requires 'Test::Most';
 test_requires 'Test::Class';
 test_requires 'Test::Mock::Class';
 test_requires 'Test::Continuous';
 test_requires 'Test::Pod::Coverage';
 test_requires 'Test::Pod';
+test_requires 'File::Tempdir';
+test_requires 'List::Util';
 test_requires 'Replay';
  
 #feature     'Feature1',
